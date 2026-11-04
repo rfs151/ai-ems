@@ -133,6 +133,7 @@ class Plant:
         self.di = {"estop": False, "fire": False, "door": False}
         self.do = {"grid_breaker": True, "fan": False}
         self.comm_down: set[str] = set()            # 故障注入：通信中断的设备
+        self.bad_block: set[str] = set()            # 故障注入：部分寄存器区返回异常响应的设备
 
     def step(self, dt: float) -> None:
         self.freq.step(dt)

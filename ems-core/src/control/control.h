@@ -24,4 +24,7 @@ void control_status(struct cJSON *obj);
 /* 处理一条下行指令（cmd 模块调用，线程安全）。成功返回 0；msg 写入结果说明 */
 int control_command(const char *type, const struct cJSON *cmd, char *msg, int msg_size);
 
+/* 规则引擎动作"停止功率输出"：reason 非空时按联锁处理（功率降为 0），空串解除 */
+void control_rule_block(const char *reason);
+
 #endif

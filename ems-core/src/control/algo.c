@@ -18,18 +18,19 @@ double fcr_power(const fcr_cfg_t *c, double f)
 }
 
 /* ------------------------------------------------------------------ LFSM-O */
-double lfsmo_power(const lfsmo_cfg_t *c, double f)
+double lfsmo_power(const lfsmo_cfg_t *c, double f, double p_now)
 {
-    if (f <= c->f_start)
+    /* 充电或停机时不调整：过频时充电本身就在帮电网，再按下垂"减功率"会变成加大放电 */
+    if (!c->enabled || p_now <= 0 || f <= c->f_start || c->droop <= 0)
         return 0.0;
-    /* ΔP/Pref = -(f - f_start)/f_nom / droop */
-    return -(f - c->f_start) / c->f_nom / c->droop * c->p_ref;
+    double dp = p_now * (f - c->f_start) / c->f_nom / c->droop;
+    return -(dp < p_now ? dp : p_now);
 }
 
 /* ------------------------------------------------------------------ mFRR */
 const char *mfrr_phase_name(mfrr_phase_t p)
 {
-    static const char *n[] = {"等待", "爬坡", "保持", "降坡", "结束"};
+    static const char *n[] = {"等待", "准备", "爬坡", "保持", "降坡", "结束"};
     return (p >= MFRR_PENDING && p <= MFRR_DONE) ? n[p] : "?";
 }
 
@@ -41,17 +42,24 @@ static double rate(const mfrr_act_t *a, const mfrr_cfg_t *c)
     return a->power / (double)c->ramp_ms;
 }
 
+/* 按台阶步长取整经过的时间：功率每 step_ms 变一档，而不是每个控制周期都变 */
+static double stepped(const mfrr_cfg_t *c, int64_t dt)
+{
+    return (double)(c->step_ms > 0 ? dt / c->step_ms * c->step_ms : dt);
+}
+
 /* 不带符号的当前功率 */
 static double level(const mfrr_act_t *a, const mfrr_cfg_t *c, int64_t now)
 {
-    if (a->phase == MFRR_DONE || a->phase == MFRR_PENDING || now < a->t_start)
+    if (a->phase == MFRR_DONE || a->phase == MFRR_PENDING || a->phase == MFRR_PREP || now < a->t_start)
         return 0.0;
     double r = rate(a, c);
+    /* 交付结束时刻本身就属于降坡（用 >=）；用 > 会在结束时刻多保持一个周期 */
     if (now >= a->t_down) {
-        double v = a->down_level - (double)(now - a->t_down) * r;
+        double v = a->down_level - stepped(c, now - a->t_down) * r;
         return v > 0 ? v : 0.0;
     }
-    double t = (double)(now - a->t_start) * r;
+    double t = stepped(c, now - a->t_start) * r;
     if (a->start_level <= a->power) {
         double v = a->start_level + t;
         return v < a->power ? v : a->power;
@@ -90,16 +98,29 @@ int mfrr_submit(mfrr_state_t *s, const mfrr_cfg_t *c, const mfrr_cmd_t *cmd, int
     if (cmd->duration_ms < c->ramp_ms || cmd->duration_ms > 3600 * 1000)
         REJECT("交付时长需在 %lld 秒 ~ 1 小时之间", (long long)(c->ramp_ms / 1000));
 
-    int64_t t0 = now;
+    int64_t ta = now;                         /* 激活时刻 */
     if (cmd->scheduled) {
-        t0 = cmd->t_start;
-        if (t0 % c->window_ms != 0)
+        ta = cmd->t_start;
+        if (ta % c->window_ms != 0)
             REJECT("计划激活必须从时间窗口边界开始（%lld 秒整数倍）", (long long)(c->window_ms / 1000));
-        if (t0 <= now)
+        /* 窗口边界已过、但仍在准备期内的指令照常执行（只是准备期变短）；
+         * 超过准备期才算迟到。不留这段余量，网络稍慢的合法指令就会被拒。 */
+        if (now > ta + c->prep_ms || (c->prep_ms == 0 && ta <= now))
             REJECT("计划开始时间已过");
-        if (t0 - now > c->max_lead_ms)
+        if (ta - now > c->max_lead_ms)
             REJECT("计划开始时间太远（最多提前 %lld 分钟）", (long long)(c->max_lead_ms / 60000));
+    } else if (cmd->t_start > 0) {
+        /* 直接激活带期望开始时间：只允许 0 ~ direct_max_lead 的提前量 */
+        int64_t lead = cmd->t_start - now;
+        if (c->direct_max_lead_ms <= 0)
+            REJECT("直接激活不支持指定开始时间");
+        if (lead < 0)
+            REJECT("直接激活的开始时间已过");
+        if (lead > c->direct_max_lead_ms)
+            REJECT("直接激活最多提前 %lld 秒", (long long)(c->direct_max_lead_ms / 1000));
+        ta = cmd->t_start;
     }
+    int64_t t0 = ta + c->prep_ms;             /* 开始爬坡 */
     int64_t t1 = t0 + cmd->duration_ms;       /* 交付结束 */
     int64_t t2 = t1 + c->ramp_ms;             /* 降坡结束 */
 
@@ -135,6 +156,7 @@ int mfrr_submit(mfrr_state_t *s, const mfrr_cfg_t *c, const mfrr_cmd_t *cmd, int
     a->dir = cmd->dir;
     a->power = cmd->power;
     a->scheduled = cmd->scheduled;
+    a->t_act = ta;
     a->t_start = t0;
     a->t_end = t1;
     a->t_down = t1;
@@ -151,7 +173,7 @@ int mfrr_cancel(mfrr_state_t *s, const mfrr_cfg_t *c, const char *id, int64_t no
     if (!a || !is_live(a))
         return -1;
     snprintf(a->end_reason, sizeof a->end_reason, "cancelled");
-    if (a->phase == MFRR_PENDING || now < a->t_start) {
+    if (a->phase == MFRR_PENDING || a->phase == MFRR_PREP || now < a->t_start) {
         a->phase = MFRR_DONE;
         return 0;
     }
@@ -165,14 +187,17 @@ int mfrr_cancel(mfrr_state_t *s, const mfrr_cfg_t *c, const char *id, int64_t no
 
 double mfrr_update(mfrr_state_t *s, const mfrr_cfg_t *c, int64_t now)
 {
-    /* 1. 到点的计划激活开始执行；同方向有正在降坡的，从它的当前值接过来（平滑交接） */
+    /* 1. 到激活时刻进入准备期；准备期满开始爬坡。
+     *    同方向有正在降坡的，从它的当前值接过来（平滑交接） */
     for (int i = 0; i < s->n; i++) {
         mfrr_act_t *a = &s->act[i];
-        if (a->phase != MFRR_PENDING || now < a->t_start)
+        if (a->phase == MFRR_PENDING && now >= a->t_act)
+            a->phase = MFRR_PREP;
+        if (a->phase != MFRR_PREP || now < a->t_start)
             continue;
         for (int j = 0; j < s->n; j++) {
             mfrr_act_t *o = &s->act[j];
-            if (j == i || o->dir != a->dir || !is_live(o) || o->phase == MFRR_PENDING)
+            if (j == i || o->dir != a->dir || !is_live(o) || o->phase == MFRR_PENDING || o->phase == MFRR_PREP)
                 continue;
             if (now >= o->t_down) {
                 a->start_level += level(o, c, now);
@@ -187,7 +212,7 @@ double mfrr_update(mfrr_state_t *s, const mfrr_cfg_t *c, int64_t now)
     double total = 0;
     for (int i = 0; i < s->n; i++) {
         mfrr_act_t *a = &s->act[i];
-        if (!is_live(a) || a->phase == MFRR_PENDING)
+        if (!is_live(a) || a->phase == MFRR_PENDING || a->phase == MFRR_PREP)
             continue;
         double v = level(a, c, now);
         if (now >= a->t_down) {

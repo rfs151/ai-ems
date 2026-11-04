@@ -1,9 +1,9 @@
 {
   "vendor": "厂商 C", "model": "CL-BMU", "type": "bms",
-  "comment": "保持寄存器；累计电量 uint32（ABCD）；状态位打包；告警为代码表",
+  "comment": "保持寄存器；累计电量 uint32 完全小端（DCBA，字节和字都反序）；状态位打包；告警为代码表",
   "points": [
-    { "key": "e_chg",     "area": "hr", "addr": 0,  "type": "u32", "order": "ABCD", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计充电量" },
-    { "key": "e_dis",     "area": "hr", "addr": 2,  "type": "u32", "order": "ABCD", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计放电量" },
+    { "key": "e_chg",     "area": "hr", "addr": 0,  "type": "u32", "order": "DCBA", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计充电量" },
+    { "key": "e_dis",     "area": "hr", "addr": 2,  "type": "u32", "order": "DCBA", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计放电量" },
     { "key": "soc",       "area": "hr", "addr": 4,  "type": "u16", "scale": 0.01, "unit": "%", "group": "fast", "name": "SOC" },
     { "key": "v",         "area": "hr", "addr": 5,  "type": "u16", "scale": 0.1,  "unit": "V", "group": "fast", "name": "总电压" },
     { "key": "i",         "area": "hr", "addr": 6,  "type": "i16", "scale": 0.1,  "unit": "A", "group": "fast", "name": "总电流" },

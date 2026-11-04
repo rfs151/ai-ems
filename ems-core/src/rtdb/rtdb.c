@@ -162,3 +162,12 @@ void rtdb_device_get(int dev, rt_device_t *out)
         memset(out, 0, sizeof *out);
     pthread_rwlock_unlock(&g_lock);
 }
+
+void rtdb_device_set_bad_blocks(int dev, int n)
+{
+    if (dev < 0 || dev >= g_ndevs)
+        return;
+    pthread_rwlock_wrlock(&g_lock);
+    g_devs[dev].bad_blocks = n;
+    pthread_rwlock_unlock(&g_lock);
+}

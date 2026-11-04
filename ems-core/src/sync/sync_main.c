@@ -6,7 +6,8 @@
  * - 单实例锁（flock）：防止误启动两个进程重复上报
  * - 遗嘱消息：异常断开时 broker 自动发布 offline
  * - 从 SQLite 发件箱按顺序读取、发布、确认后删除；断网时数据留在发件箱，恢复后按顺序补传
- * - 下行指令：校验过期时间、去重后经 Unix 套接字转给 ems-core，结果发布到 cmd_ack
+ * - 下行指令：校验过期时间、去重、按类型检查必填字段后经 Unix 套接字转给 ems-core，结果发布到 cmd_ack
+ * - 断线重连：2s 起指数退避到 60s；设置 MQTT_CAFILE 时启用 TLS（服务端证书校验）
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -32,10 +33,11 @@
 
 #define BATCH 200
 #define POLL_MS 200
+#define MAX_CMD_BYTES 4096
 /* 超过这么久没连上 broker 就主动重连。broker 刚启动、还没监听时连接被拒绝，
  * libmosquitto 的线程循环不会再重试（开机时 ems-sync 比 mosquitto 早几十毫秒就会这样，
- * 之后永远不上云）。 */
-#define RECONNECT_MS 15000
+ * 之后永远不上云）。比退避上限 60s 略长，正常断线仍按退避节奏重连。 */
+#define RECONNECT_MS 65000
 
 static volatile sig_atomic_t g_stop;
 static atomic_int g_connected;
@@ -76,6 +78,45 @@ static void on_disconnect(struct mosquitto *m, void *ud, int rc)
     atomic_store(&g_connected, 0);
     if (!g_stop)
         LOGW("sync", "MQTT 断开（%s），数据暂存发件箱", mosquitto_strerror(rc));
+}
+
+/* 各类下行指令的必填字段（类型 n = 数字，s = 字符串，b = 布尔，o = 对象）。
+ * 在边缘入口先挡掉格式不对的指令，返回明确原因，不让 ems-core 拿默认值去执行 */
+static const struct {
+    const char *type;
+    const char *fields;
+} REQUIRED[] = {
+    {"mfrr", "n:dir n:power n:duration_s b:scheduled"},
+    {"mfrr_cancel", "s:target"},
+    {"mode", "s:mode"},
+    {"fcr", "b:enabled"},
+    {"lfsm", ""},
+    {"rule_set", "o:rule"},
+    {"rule_del", "s:rule_id"},
+    {"rule_reset", ""},
+};
+
+/* 校验通过返回 NULL，否则返回原因（写入 buf） */
+static const char *validate(const char *type, const cJSON *j, char *buf, size_t bsz)
+{
+    for (size_t i = 0; i < sizeof REQUIRED / sizeof REQUIRED[0]; i++) {
+        if (strcmp(REQUIRED[i].type, type) != 0)
+            continue;
+        char spec[128];
+        snprintf(spec, sizeof spec, "%s", REQUIRED[i].fields);
+        for (char *save = NULL, *f = strtok_r(spec, " ", &save); f; f = strtok_r(NULL, " ", &save)) {
+            const cJSON *it = cJSON_GetObjectItemCaseSensitive(j, f + 2);
+            int ok = f[0] == 'n' ? cJSON_IsNumber(it) : f[0] == 's' ? cJSON_IsString(it)
+                   : f[0] == 'b' ? cJSON_IsBool(it) : cJSON_IsObject(it);
+            if (!ok) {
+                snprintf(buf, bsz, "缺少或类型错误的字段 %s", f + 2);
+                return buf;
+            }
+        }
+        return NULL;
+    }
+    snprintf(buf, bsz, "不支持的指令类型 %s", type);
+    return buf;
 }
 
 static int seen(const char *id)
@@ -127,6 +168,10 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
     int64_t rx = wall_ms();
     const char *type = strrchr(msg->topic, '/');
     type = type ? type + 1 : "";
+    if (msg->payloadlen > MAX_CMD_BYTES) {
+        LOGW("sync", "丢弃过长的指令（%s，%d 字节）", msg->topic, msg->payloadlen);
+        return;
+    }
     cJSON *j = cJSON_ParseWithLength(msg->payload, (size_t)msg->payloadlen);
     const cJSON *jid = j ? cJSON_GetObjectItemCaseSensitive(j, "id") : NULL;
     if (!cJSON_IsString(jid) || !jid->valuestring[0]) {
@@ -136,10 +181,15 @@ static void on_message(struct mosquitto *m, void *ud, const struct mosquitto_mes
     }
     const char *id = jid->valuestring;
     const cJSON *exp = cJSON_GetObjectItemCaseSensitive(j, "exp");
+    char why[96];
+    const char *bad = NULL;
     if (seen(id)) {
         LOGD("sync", "重复指令 %s，忽略", id);
     } else if (!cJSON_IsNumber(exp) || exp->valuedouble < (double)rx) {
         publish_ack(m, id, type, 0, "指令已过期或缺少过期时间", rx);
+    } else if ((bad = validate(type, j, why, sizeof why)) != NULL) {
+        LOGW("sync", "拒绝指令 %s（%s）：%s", id, type, bad);
+        publish_ack(m, id, type, 0, bad, rx);
     } else {
         cJSON_DeleteItemFromObjectCaseSensitive(j, "type");
         cJSON_AddStringToObject(j, "type", type);
@@ -270,7 +320,17 @@ int main(int argc, char **argv)
     mosquitto_connect_callback_set(m, on_connect);
     mosquitto_disconnect_callback_set(m, on_disconnect);
     mosquitto_message_callback_set(m, on_message);
-    mosquitto_reconnect_delay_set(m, 1, 10, true);
+    /* 断线后 2s、4s、8s … 最长 60s 重试：broker 故障时不会每秒狂连，恢复后也能较快连上 */
+    mosquitto_reconnect_delay_set(m, 2, 60, true);
+    const char *cafile = getenv("MQTT_CAFILE");
+    if (cafile && cafile[0]) {
+        int r = mosquitto_tls_set(m, cafile, NULL, getenv("MQTT_CERT"), getenv("MQTT_KEY"), NULL);
+        if (r != MOSQ_ERR_SUCCESS) {
+            LOGE("sync", "加载 TLS 证书 %s 失败：%s", cafile, mosquitto_strerror(r));
+            return 1;
+        }
+        LOGI("sync", "MQTT 使用 TLS，CA %s", cafile);
+    }
     mosquitto_connect_async(m, host, port, 30);
     mosquitto_loop_start(m);
     LOGI("sync", "上云进程启动，broker %s:%d，站点 %s", host, port, cfg.site_id);

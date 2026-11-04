@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 频率-功率特性：FCR（死区 + 线性 + 饱和）与 LFSM-O（50.2Hz 起下垂），实时工作点随频率移动
+// 频率-功率特性：FCR（死区 + 线性 + 饱和）与 LFSM-O（以当前出力为参考的下垂），实时工作点随频率移动
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as echarts from 'echarts/core'
 import { LineChart, ScatterChart } from 'echarts/charts'
@@ -24,7 +24,13 @@ function curves() {
     if (a <= c.fcr_deadband) return 0
     return (f < 50 ? 1 : -1) * Math.min(1, (a - c.fcr_deadband) / (c.fcr_full_dev - c.fcr_deadband)) * c.fcr_p_max
   }
-  const lfsmo = (f: number) => (f <= c.lfsmo_start ? 0 : -((f - c.lfsmo_start) / 50 / c.lfsmo_droop) * c.lfsmo_p_ref)
+  // LFSM-O 以当前出力为参考：曲线按此刻的叠加功率（无 mFRR 时按 FCR 自身）画，只削减放电
+  const pNow = ems.latest?.ctl?.p_pre ?? 0
+  const lfsmo = (f: number) => {
+    const p = pNow - fcr(fNow()) + fcr(f)
+    if (!c.lfsmo_enabled || p <= 0 || f <= c.lfsmo_start) return 0
+    return -Math.min(p, p * (f - c.lfsmo_start) / 50 / c.lfsmo_droop)
+  }
   const xs: number[] = []
   for (let f = 49.6; f <= 50.5001; f += 0.002) xs.push(+f.toFixed(3))
   return {
@@ -49,7 +55,7 @@ function option(): echarts.EChartsCoreOption {
       { name: 'FCR', type: 'line', showSymbol: false, data: cv.fcr, lineStyle: { color: css('--s-fcr'), width: 1.4, type: 'dashed' }, itemStyle: { color: css('--s-fcr') } },
       { name: 'LFSM-O', type: 'line', showSymbol: false, data: cv.lfsmo, lineStyle: { color: css('--s-lfsmo'), width: 1.4, type: 'dashed' }, itemStyle: { color: css('--s-lfsmo') },
         markLine: { silent: true, symbol: 'none', lineStyle: { color: css('--warn'), type: 'dotted' }, label: { color: css('--warn'), fontSize: 11 },
-          data: [{ xAxis: 50.2, name: '50.2' }], } },
+          data: [{ xAxis: cfg.value?.lfsmo_start ?? 50.2, name: String(cfg.value?.lfsmo_start ?? 50.2) }], } },
       { name: '合计', type: 'line', showSymbol: false, data: cv.sum, lineStyle: { color: css('--text'), width: 2 }, itemStyle: { color: css('--text') } },
       { name: '当前工作点', type: 'scatter', symbolSize: 12, data: [], itemStyle: { color: css('--accent'), borderColor: '#fff', borderWidth: 2 }, z: 10 },
     ],
@@ -62,6 +68,7 @@ function refresh() {
   chart.setOption({ series: [{}, {}, {}, { data: [[f, (c.fcr_enabled ? c.p_fcr : 0) + c.p_lfsmo]] }] })
 }
 const rebuild = () => { chart?.setOption(option(), true); refresh() }
+const fNow = () => val('meter.f') ?? 50
 
 onMounted(() => {
   chart = echarts.init(el.value!)
@@ -75,8 +82,8 @@ onBeforeUnmount(() => {
   matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', rebuild)
   chart?.dispose()
 })
-watch(() => ems.latest?.ts, refresh)
-watch(cfg, (n, o) => { if (n && !o) rebuild() })
+// 曲线依赖当前出力和 LFSM-O 参数，每秒重画一次
+watch(() => ems.latest?.ts, rebuild)
 </script>
 
 <template><div ref="el" class="chart"></div></template>

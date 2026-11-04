@@ -1,6 +1,6 @@
 """云端（模拟云平台 / VPP 调度）
 
-- 订阅边缘网关上行：ems/<site>/{meta,telemetry,event,events,status,cmd_ack}
+- 订阅边缘网关上行：ems/<site>/{meta,telemetry,event,events,alarm,status,cmd_ack}
 - 下发指令：ems/<site>/cmd/<type>（带编号和过期时间），收到 cmd_ack 后计算往返时延
 - 场景控制（频率扰动、故障注入）：sim/scenario，只发给设备仿真，不经过网关
 - 内存保留最近 30 分钟遥测、最近 200 条事件，通过 WebSocket 推给浏览器
@@ -55,6 +55,7 @@ class State:
         self.latest: dict | None = None
         self.history: deque[dict] = deque(maxlen=HISTORY_S)
         self.events: deque[dict] = deque(maxlen=200)
+        self.alarms: deque[dict] = deque(maxlen=100)     # 规则告警（alarm 主题）
         self.cmds: deque[dict] = deque(maxlen=50)
         self.waiters: dict[str, asyncio.Future] = {}
         self.last_rx = 0.0
@@ -62,6 +63,7 @@ class State:
         self.last_auto = 0.0
         self.auto_dir = 1
         self.scenario_dirty = False      # 访客改过场景（故障、急停等），需要定期恢复
+        self.config_dirty = False        # 访客改过规则或 LFSM-O 参数，需要定期恢复
         self.rate: dict[str, float] = {}
         self.clients: set[WebSocket] = set()
 
@@ -73,6 +75,7 @@ class State:
             "history": [slim(t) for t in list(self.history)[-600:]],
             "latest": self.latest,
             "events": list(self.events),
+            "alarms": list(self.alarms),
             "cmds": list(self.cmds),
         }
 
@@ -163,6 +166,11 @@ def handle(topic: str, payload: bytes) -> None:
             state.events.clear()
             state.events.extend(merged[-state.events.maxlen:])
             push({"type": "events", "data": list(state.events)})
+    elif kind == "alarm":
+        if any(a.get("id") == data.get("id") for a in state.alarms):
+            return
+        state.alarms.append(data)
+        push({"type": "alarm", "data": data})
     elif kind == "cmd_ack":
         on_ack(data)
 
@@ -171,7 +179,8 @@ def start_mqtt() -> mqtt.Client:
     def on_connect(c, _u, _f, rc, _p=None):
         log.info("MQTT 已连接 %s:%s（rc=%s）", MQTT_HOST, MQTT_PORT, rc)
         c.subscribe([("ems/+/meta", 1), ("ems/+/telemetry", 0), ("ems/+/event", 1),
-                     ("ems/+/events", 1), ("ems/+/status", 1), ("ems/+/cmd_ack", 1)])
+                     ("ems/+/events", 1), ("ems/+/alarm", 1), ("ems/+/status", 1),
+                     ("ems/+/cmd_ack", 1)])
 
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ems-cloud-{os.getpid()}")
     c.on_connect = on_connect
@@ -227,6 +236,29 @@ class MfrrReq(BaseModel):
     power: float = Field(ge=50, le=800)
     activation: str = "direct"           # direct / scheduled
     duration_s: int = Field(ge=30, le=600)
+    lead_s: int = Field(default=0, ge=0, le=120)   # 直接激活的提前量（网关校验上限）
+
+
+class LfsmReq(BaseModel):
+    enabled: bool
+    f_start: float = Field(ge=50.0, le=51.0)
+    droop: float = Field(ge=0.0, le=0.5)
+
+
+class RuleReq(BaseModel):
+    id: str | None = Field(default=None, max_length=15)
+    name: str = Field(min_length=1, max_length=40)
+    point: str = Field(min_length=1, max_length=47)
+    cond: str = Field(default="", max_length=190)
+    level: int = Field(default=1, ge=0, le=2)
+    action: str = Field(default="alarm", max_length=39)
+    limit_min: int = Field(default=0, ge=0, le=60)
+    limit_day: int = Field(default=0, ge=0, le=256)
+    enabled: bool = True
+
+
+class RuleDelReq(BaseModel):
+    rule_id: str = Field(max_length=15)
 
 
 class CancelReq(BaseModel):
@@ -259,12 +291,48 @@ async def cmd_mfrr(body: MfrrReq, req: Request):
     scheduled = body.activation == "scheduled"
     cmd = {"dir": body.dir, "power": body.power, "scheduled": scheduled, "duration_s": body.duration_s}
     when = "立即"
+    if not scheduled and body.lead_s:
+        cmd["lead_s"] = body.lead_s
+        when = f"{body.lead_s} 秒后"
     if scheduled:
         window = int(((state.latest or {}).get("ctl", {}).get("cfg", {}) or {}).get("mfrr_window_s", 60)) * 1000
         cmd["t_start"] = math.ceil((now_ms() + 10_000) / window) * window   # 下一个窗口边界（至少提前 10 秒）
         when = time.strftime("%H:%M:%S", time.localtime(cmd["t_start"] / 1000)) + " 开始"
     summary = f"mFRR {'上调' if body.dir > 0 else '下调'} {body.power:.0f} kW，{when}，交付 {body.duration_s} 秒"
     return await send_cmd("mfrr", cmd, summary, "visitor")
+
+
+@app.post("/api/cmd/lfsm")
+async def cmd_lfsm(body: LfsmReq, req: Request):
+    if (r := check_rate(req)) is not None:
+        return r
+    state.config_dirty = True
+    text = f"LFSM-O {'投入' if body.enabled else '退出'}，{body.f_start:.2f} Hz，下垂 {body.droop * 100:.0f}%"
+    return await send_cmd("lfsm", body.model_dump(), text, "visitor")
+
+
+@app.post("/api/cmd/rule_set")
+async def cmd_rule_set(body: RuleReq, req: Request):
+    if (r := check_rate(req)) is not None:
+        return r
+    state.config_dirty = True
+    rule = body.model_dump(exclude_none=True)
+    return await send_cmd("rule_set", {"rule": rule}, f"{'修改' if body.id else '新增'}规则「{body.name}」", "visitor")
+
+
+@app.post("/api/cmd/rule_del")
+async def cmd_rule_del(body: RuleDelReq, req: Request):
+    if (r := check_rate(req)) is not None:
+        return r
+    state.config_dirty = True
+    return await send_cmd("rule_del", {"rule_id": body.rule_id}, f"删除规则 {body.rule_id}", "visitor")
+
+
+@app.post("/api/cmd/rule_reset")
+async def cmd_rule_reset(req: Request):
+    if (r := check_rate(req)) is not None:
+        return r
+    return await send_cmd("rule_reset", {}, "规则恢复默认", "visitor")
 
 
 @app.post("/api/cmd/mfrr_cancel")
@@ -302,6 +370,9 @@ async def post_scenario(body: ScenarioReq, req: Request):
     elif a == "comm" and body.device in DEVICES and body.down is not None:
         scenario({"action": a, "device": body.device, "down": body.down})
         text = f"{body.device} 通信{'中断' if body.down else '恢复'}"
+    elif a == "block" and body.device == "bat1" and body.down is not None:
+        scenario({"action": a, "device": body.device, "bad": body.down})
+        text = f"电池簇-1 单体电压区{'返回异常响应' if body.down else '恢复正常'}"
     elif a == "di" and body.name in ("estop", "fire", "door") and body.value is not None:
         scenario({"action": a, "name": body.name, "value": body.value})
         text = f"DI {body.name} = {int(body.value)}"
@@ -341,6 +412,11 @@ async def autopilot() -> None:
                 if not ctl.get("fcr_enabled", True):
                     await send_cmd("fcr", {"enabled": True}, "FCR 投入", "auto")
                 log.info("长时间无人操作，已恢复初始场景")
+            if idle > RESET_IDLE_S and state.config_dirty:
+                state.config_dirty = False
+                await send_cmd("rule_reset", {}, "规则恢复默认", "auto")
+                await send_cmd("lfsm", {"enabled": True, "f_start": 50.2, "droop": 0.02},
+                               "LFSM-O 恢复默认参数", "auto")
         except Exception:  # noqa: BLE001  自动演示出错不影响主流程
             log.exception("自动演示出错")
 

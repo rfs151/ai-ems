@@ -46,10 +46,35 @@ sqlite3 *storage_open(const char *path)
         sqlite3_close(db);
         return NULL;
     }
-    /* WAL：读写不互斥；NORMAL：WAL 下断电最多丢最后一个事务，不会损坏 */
+    /* WAL：读写不互斥；NORMAL：WAL 下断电最多丢最后一个事务，不会损坏。
+     * busy_timeout 5 秒：ems-core 的存储线程、规则线程和 ems-sync 三个连接同时访问，
+     * 遇到短暂的写锁时等待重试，而不是直接返回 SQLITE_BUSY 丢数据 */
     sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;", NULL, NULL, NULL);
-    sqlite3_busy_timeout(db, 2000);
+    sqlite3_busy_timeout(db, 5000);
     return db;
+}
+
+int storage_ensure_column(sqlite3 *db, const char *table, const char *column, const char *decl)
+{
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM pragma_table_info(?) WHERE name=?", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, table, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, column, -1, SQLITE_STATIC);
+    int exists = sqlite3_step(st) == SQLITE_ROW;
+    sqlite3_finalize(st);
+    if (exists)
+        return 0;
+    char sql[256];
+    snprintf(sql, sizeof sql, "ALTER TABLE %s ADD COLUMN %s %s", table, column, decl);
+    char *err = NULL;
+    if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        LOGE("storage", "升级表 %s 增加列 %s 失败：%s", table, column, err);
+        sqlite3_free(err);
+        return -1;
+    }
+    LOGI("storage", "表 %s 已增加列 %s（数据库原地升级）", table, column);
+    return 1;
 }
 
 static int exec(const char *sql)
@@ -125,7 +150,7 @@ static void publish_meta(void)
             cJSON_AddNumberToObject(jp, "addr", p->addr);
             cJSON_AddStringToObject(jp, "type", type_name(p->type));
             if (point_reg_count(p) == 2)
-                cJSON_AddStringToObject(jp, "order", p->word_swap ? "CDAB" : "ABCD");
+                cJSON_AddStringToObject(jp, "order", order_name(p->order));
             if (p->scale != 1.0)
                 cJSON_AddNumberToObject(jp, "scale", p->scale);
             if (p->bit >= 0)
@@ -145,7 +170,7 @@ static void publish_meta(void)
             cJSON_AddNumberToObject(jc, "addr", c->def.addr);
             cJSON_AddStringToObject(jc, "type", type_name(c->def.type));
             if (point_reg_count(&c->def) == 2)
-                cJSON_AddStringToObject(jc, "order", c->def.word_swap ? "CDAB" : "ABCD");
+                cJSON_AddStringToObject(jc, "order", order_name(c->def.order));
             if (c->def.scale != 1.0)
                 cJSON_AddNumberToObject(jc, "scale", c->def.scale);
             if (c->has_unlock) {
@@ -229,6 +254,7 @@ static void queue_telemetry(int n, int64_t now)
         cJSON_AddNumberToObject(jd, "reads", (double)st.reads);
         cJSON_AddNumberToObject(jd, "errors", (double)st.errors);
         cJSON_AddNumberToObject(jd, "writes", (double)st.writes);
+        cJSON_AddNumberToObject(jd, "bad_blocks", st.bad_blocks);
     }
     if (g_status_fn)
         g_status_fn(root);
@@ -293,6 +319,9 @@ static int store_events(void)
             cJSON_AddStringToObject(j, "text", e->text);
             char *s = cJSON_PrintUnformatted(j);
             outbox_put("event", s, 1, 0, "event");
+            /* 规则告警另走 alarm 主题：云端告警中心只订阅这一路，不用从全部事件里筛 */
+            if (strncmp(e->code, "alarm_", 6) == 0 || strcmp(e->code, "point_change") == 0)
+                outbox_put("alarm", s, 1, 0, "alarm");
             free(s);
             cJSON_Delete(j);
         }

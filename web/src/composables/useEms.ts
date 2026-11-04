@@ -9,6 +9,7 @@ export const ems = reactive({
   meta: null as Meta | null,
   latest: null as Telemetry | null,
   events: [] as EmsEvent[],
+  alarms: [] as EmsEvent[],
   cmds: [] as CmdRecord[],
   lastRx: 0,
 })
@@ -44,6 +45,7 @@ function handle(msg: any) {
       ems.edge = msg.status
       ems.latest = msg.latest
       ems.events = [...msg.events].reverse()
+      ems.alarms = [...(msg.alarms ?? [])].reverse()
       ems.cmds = [...(msg.cmds ?? [])].reverse()
       history.value = msg.history
       historyVersion.value++
@@ -61,6 +63,10 @@ function handle(msg: any) {
     case 'cmd': upsertCmd(msg.data); break
     case 'events':
       ems.events = [...msg.data].reverse()
+      break
+    case 'alarm':
+      ems.alarms.unshift(msg.data)
+      if (ems.alarms.length > 100) ems.alarms.length = 100
       break
     case 'event':
       ems.events.unshift(msg.data)

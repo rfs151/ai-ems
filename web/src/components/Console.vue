@@ -2,7 +2,8 @@
 import { computed, reactive, ref } from 'vue'
 import { ems, fmt, post } from '../composables/useEms'
 
-const form = reactive({ dir: 1, power: 300, activation: 'direct', duration_s: 90 })
+const form = reactive({ dir: 1, power: 300, activation: 'direct', duration_s: 90, lead_s: 0 })
+const lfsm = reactive({ f_start: 50.2, droop: 0.02 })
 const busy = ref(false)
 const result = ref<{ ok: boolean | null; msg: string } | null>(null)
 
@@ -10,10 +11,13 @@ const ctl = computed(() => ems.latest?.ctl)
 const acts = computed(() => (ctl.value?.mfrr ?? []).filter((a) => a.phase !== '结束'))
 const windowS = computed(() => ctl.value?.cfg?.mfrr_window_s ?? 60)
 const pMax = computed(() => ctl.value?.cfg?.mfrr_p_max ?? 800)
+const leadMax = computed(() => ctl.value?.cfg?.mfrr_direct_lead_s ?? 60)
 const faults = computed(() => ({
   bat2: ems.latest?.dev?.bat2?.online === false,
   pcs1: ems.latest?.dev?.pcs1?.online === false,
   estop: (ems.latest?.v['dio.estop'] ?? 0) > 0.5,
+  door: (ems.latest?.v['dio.door'] ?? 0) > 0.5,
+  block: (ems.latest?.dev?.bat1?.bad_blocks ?? 0) > 0,
 }))
 
 async function run(path: string, body: unknown) {
@@ -24,7 +28,10 @@ async function run(path: string, body: unknown) {
   busy.value = false
 }
 
-const sendMfrr = () => run('/api/cmd/mfrr', { ...form })
+const sendMfrr = () => run('/api/cmd/mfrr', { ...form, lead_s: form.activation === 'direct' ? form.lead_s : 0 })
+const setLfsm = (enabled: boolean) => run('/api/cmd/lfsm', { enabled, ...lfsm })
+const door = (value: boolean) => run('/api/scenario', { action: 'di', name: 'door', value })
+const block = (down: boolean) => run('/api/scenario', { action: 'block', device: 'bat1', down })
 const cancel = (id: string) => run('/api/cmd/mfrr_cancel', { target: id })
 const setMode = (mode: string) => run('/api/cmd/mode', { mode })
 const setFcr = (enabled: boolean) => run('/api/cmd/fcr', { enabled })
@@ -34,7 +41,7 @@ const estop = (value: boolean) => run('/api/scenario', { action: 'di', name: 'es
 const reset = () => run('/api/scenario', { action: 'reset' })
 
 const time = (ts: number) => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
-const phaseCls: Record<string, string> = { 等待: '', 爬坡: 'warn', 保持: 'good', 降坡: 'warn' }
+const phaseCls: Record<string, string> = { 等待: '', 准备: '', 爬坡: 'warn', 保持: 'good', 降坡: 'warn' }
 </script>
 
 <template>
@@ -67,6 +74,13 @@ const phaseCls: Record<string, string> = { 等待: '', 爬坡: 'warn', 保持: '
         <label><input type="radio" value="direct" v-model="form.activation"> 立即</label>
         <label><input type="radio" value="scheduled" v-model="form.activation"> 下一个 {{ windowS }}s 窗口</label>
       </div>
+      <div class="row" v-if="form.activation === 'direct'">
+        <span class="muted">延时</span>
+        <select v-model.number="form.lead_s">
+          <option :value="0">立即开始</option><option :value="20">20 秒后</option>
+          <option :value="leadMax">{{ leadMax }} 秒后（上限）</option><option :value="leadMax + 30">{{ leadMax + 30 }} 秒后（超限，网关拒绝）</option>
+        </select>
+      </div>
       <div class="row">
         <span class="muted">交付</span>
         <select v-model.number="form.duration_s">
@@ -84,7 +98,7 @@ const phaseCls: Record<string, string> = { 等待: '', 爬坡: 'warn', 保持: '
             <button class="link" :disabled="busy" @click="cancel(a.id)">取消</button>
           </div>
           <div class="bar"><i :style="{ width: Math.min(100, Math.abs(a.level) / a.power * 100) + '%' }"></i></div>
-          <div class="muted small num">{{ time(a.t_start) }} → {{ time(a.t_end) }} · 当前 {{ fmt(Math.abs(a.level), 0, 'kW') }}</div>
+          <div class="muted small num">激活 {{ time(a.t_act || a.t_start) }} · 爬坡 {{ time(a.t_start) }} → {{ time(a.t_end) }} · 当前 {{ fmt(Math.abs(a.level), 0, 'kW') }}</div>
         </div>
       </div>
     </div>
@@ -99,6 +113,25 @@ const phaseCls: Record<string, string> = { 等待: '', 爬坡: 'warn', 保持: '
     </div>
 
     <div class="block">
+      <div class="label">LFSM-O 过频限功率</div>
+      <div class="row">
+        <span class="muted">启动</span>
+        <select v-model.number="lfsm.f_start">
+          <option :value="50.2">50.20 Hz</option><option :value="50.25">50.25 Hz</option><option :value="50.3">50.30 Hz</option>
+        </select>
+        <span class="muted">下垂</span>
+        <select v-model.number="lfsm.droop">
+          <option :value="0.02">2%</option><option :value="0.05">5%</option><option :value="0.08">8%</option>
+        </select>
+      </div>
+      <div class="row">
+        <span class="muted">当前：{{ ctl?.cfg?.lfsmo_enabled ? '投入' : '退出' }} {{ ctl?.cfg?.lfsmo_start?.toFixed(2) }} Hz / {{ ((ctl?.cfg?.lfsmo_droop ?? 0) * 100).toFixed(0) }}%</span>
+        <button :disabled="busy" @click="setLfsm(true)">投入</button>
+        <button :disabled="busy" @click="setLfsm(false)">退出</button>
+      </div>
+    </div>
+
+    <div class="block">
       <div class="label">故障注入</div>
       <label class="check"><input type="checkbox" :checked="faults.bat2" :disabled="busy"
         @change="comm('bat2', ($event.target as HTMLInputElement).checked)"> 电池簇-2 通信中断</label>
@@ -106,6 +139,10 @@ const phaseCls: Record<string, string> = { 等待: '', 爬坡: 'warn', 保持: '
         @change="comm('pcs1', ($event.target as HTMLInputElement).checked)"> PCS-1 通信中断</label>
       <label class="check"><input type="checkbox" :checked="faults.estop" :disabled="busy"
         @change="estop(($event.target as HTMLInputElement).checked)"> 急停按下</label>
+      <label class="check"><input type="checkbox" :checked="faults.door" :disabled="busy"
+        @change="door(($event.target as HTMLInputElement).checked)"> 储能舱门打开<small class="muted">（规则 R2 停机）</small></label>
+      <label class="check"><input type="checkbox" :checked="faults.block" :disabled="busy"
+        @change="block(($event.target as HTMLInputElement).checked)"> 电池簇-1 单体电压区异常<small class="muted">（部分点失效，设备仍在线）</small></label>
       <button class="ghost" :disabled="busy" @click="reset">恢复初始场景</button>
     </div>
 

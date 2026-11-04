@@ -26,7 +26,7 @@ const devices = computed(() => ems.meta?.devices ?? [])
   <section class="panel">
     <h3>设备通信 <span class="sub">Modbus TCP</span></h3>
     <table>
-      <thead><tr><th>设备</th><th>耗时</th><th>读</th><th>错</th><th>写</th></tr></thead>
+      <thead><tr><th>设备</th><th>耗时</th><th>读</th><th>错</th><th>写</th><th>异常块</th></tr></thead>
       <tbody>
         <tr v-for="d in devices" :key="d.id">
           <td><span class="dot" :class="ems.latest?.dev[d.id]?.online ? 'good' : 'bad'"></span> {{ d.id }}</td>
@@ -34,6 +34,7 @@ const devices = computed(() => ems.meta?.devices ?? [])
           <td class="num">{{ ems.latest?.dev[d.id]?.reads ?? '—' }}</td>
           <td class="num">{{ ems.latest?.dev[d.id]?.errors ?? '—' }}</td>
           <td class="num">{{ ems.latest?.dev[d.id]?.writes ?? '—' }}</td>
+          <td class="num" :class="{ warn: (ems.latest?.dev[d.id]?.bad_blocks ?? 0) > 0 }">{{ ems.latest?.dev[d.id]?.bad_blocks ?? 0 }}</td>
         </tr>
       </tbody>
     </table>
@@ -47,4 +48,5 @@ const devices = computed(() => ems.meta?.devices ?? [])
 .kvs b { font-weight: 600; }
 b.good { color: var(--good); } b.bad { color: var(--bad); }
 td, th { padding: 5px 10px; font-size: 12px; }
+td.warn { color: var(--warn); font-weight: 600; }
 </style>

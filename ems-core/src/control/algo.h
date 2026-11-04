@@ -21,20 +21,23 @@ double fcr_power(const fcr_cfg_t *c, double f);
 
 /* ------------------------------------------------------------------ LFSM-O 过频限功率 */
 typedef struct {
+    int enabled;         /* 功能开关（现场按并网要求投退，可远程修改） */
     double f_nom;        /* 50.0 Hz */
-    double f_start;      /* 启动频率 50.2 Hz */
+    double f_start;      /* 启动频率，默认 50.2 Hz */
     double droop;        /* 下垂系数，0.02 = 2% */
-    double p_ref;        /* 参考功率 kW（额定容量） */
 } lfsmo_cfg_t;
 
-/* 频率超过 f_start 后按下垂减功率（储能可以一直减到充电），否则为 0 */
-double lfsmo_power(const lfsmo_cfg_t *c, double f);
+/* 以当前出力 p_now 为参考功率：ΔP = p_now × (f − f_start) / f_nom / droop。
+ * 只削减放电，最多削到 0；p_now ≤ 0（充电或停机）时不调整。
+ * 返回修正量（≤ 0）。 */
+double lfsmo_power(const lfsmo_cfg_t *c, double f, double p_now);
 
 /* ------------------------------------------------------------------ mFRR 手动频率恢复备用 */
 #define MFRR_MAX_ACT 6
 
 typedef enum {
     MFRR_PENDING,        /* 计划激活，等待开始时刻 */
+    MFRR_PREP,           /* 准备期：已激活，功率仍为 0（实际业务 2.5 分钟） */
     MFRR_RAMP_UP,
     MFRR_HOLD,
     MFRR_RAMP_DOWN,
@@ -42,11 +45,14 @@ typedef enum {
 } mfrr_phase_t;
 
 typedef struct {
-    int64_t ramp_ms;      /* 满功率爬坡时间（演示 30s，实际 12.5 分钟） */
+    int64_t ramp_ms;      /* 满功率爬坡时间（演示 24s，实际 10 分钟） */
     int64_t window_ms;    /* 计划激活的时间窗口粒度（演示 60s，实际 15 分钟） */
     int64_t max_lead_ms;  /* 计划激活最远可提前多久下发 */
     double p_min;         /* 单条指令最小功率 */
     double p_max;         /* 同方向所有激活之和上限 */
+    int64_t prep_ms;      /* 准备期，激活后先保持 0 功率（演示 6s，实际 2.5 分钟）；0 = 无 */
+    int64_t step_ms;      /* 爬坡/降坡按台阶推进的步长（实际 1 秒一档）；0 = 连续 */
+    int64_t direct_max_lead_ms; /* 直接激活允许带的最大提前量（实际 15 分钟）；0 = 不允许带开始时间 */
 } mfrr_cfg_t;
 
 typedef struct {
@@ -54,7 +60,8 @@ typedef struct {
     int dir;              /* +1 上调（放电），-1 下调（充电） */
     double power;         /* 目标功率（正数） */
     int scheduled;        /* 1 计划激活，0 直接激活 */
-    int64_t t_start;      /* 开始爬坡时刻 */
+    int64_t t_act;        /* 激活时刻（准备期起点） */
+    int64_t t_start;      /* 开始爬坡时刻 = t_act + 准备期 */
     int64_t t_end;        /* 交付结束时刻（此后降坡） */
     double start_level;   /* 爬坡起点（交接时从前一条的当前值开始） */
     int64_t t_down;       /* 开始降坡时刻（取消时会提前） */
@@ -73,7 +80,7 @@ typedef struct {
     int dir;
     double power;
     int scheduled;
-    int64_t t_start;      /* 计划激活的开始时刻；直接激活忽略 */
+    int64_t t_start;      /* 计划激活：窗口边界上的激活时刻；直接激活：可选的期望开始时刻（0 = 立即） */
     int64_t duration_ms;  /* 交付时长（从开始爬坡算起） */
 } mfrr_cmd_t;
 

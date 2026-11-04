@@ -24,6 +24,8 @@ typedef struct {
     uint16_t count;
     const point_def_t **pts;
     int npts;
+    int bad;            /* 上一轮该块是否读取失败（用于只在状态变化时发事件） */
+    uint64_t errors;
 } block_t;
 
 typedef struct {
@@ -147,10 +149,13 @@ static int ensure_connected(worker_t *w)
     return -1;
 }
 
-/* Modbus 异常响应（非法地址等）说明链路是通的，保留连接；其他错误断开重连 */
+/* 链路级错误（超时、断开、报文损坏）：连接已不可用，断开重连。
+ * Modbus 异常响应（非法地址等）说明链路是通的，只是这一块寄存器有问题。 */
+static int link_error(int err) { return err < MODBUS_ENOBASE || err == EMBBADDATA; }
+
 static void handle_error(worker_t *w)
 {
-    if (errno < MODBUS_ENOBASE || errno == EMBBADDATA)
+    if (link_error(errno))
         disconnect(w);
 }
 
@@ -183,18 +188,63 @@ static int read_block(worker_t *w, const block_t *b, int64_t ts)
     return 0;
 }
 
+static void mark_block(const block_t *b, uint8_t q, int64_t ts)
+{
+    for (int i = 0; i < b->npts; i++)
+        rtdb_set(b->pts[i]->rt_index, 0, q, ts);
+}
+
+/* 一轮采集：链路错误立即中止；某一块返回异常响应只影响这一块（点置无效），其余块照常读。
+ * 只有本组所有块都失败才算这台设备本轮失败（计入离线判定）。
+ * 早期写法是"任一块失败就 break 并判整机失败"，一个寄存器区不支持就会让整台设备离线。 */
 static void poll_group(worker_t *w, group_t g)
 {
     int64_t t0 = mono_ms();
-    int ok = ensure_connected(w) == 0;
-    for (int i = 0; ok && i < w->nblocks; i++) {
-        if (w->blocks[i].group != g)
+    int linked = ensure_connected(w) == 0, nblk = 0, nok = 0;
+    int failed[w->nblocks > 0 ? w->nblocks : 1];       /* 本轮失败块的 errno，0 = 成功或未读 */
+    memset(failed, 0, sizeof failed);
+    for (int i = 0; linked && i < w->nblocks; i++) {
+        block_t *b = &w->blocks[i];
+        if (b->group != g)
             continue;
-        if (read_block(w, &w->blocks[i], wall_ms())) {
-            LOGD("acq", "%s 读取失败：%s", w->dev->id, modbus_strerror(errno));
-            handle_error(w);
-            ok = 0;
+        nblk++;
+        int64_t ts = wall_ms();
+        if (read_block(w, b, ts) == 0) {
+            nok++;
+            continue;
         }
+        int err = errno;
+        b->errors++;
+        LOGD("acq", "%s 块 %u+%u 读取失败：%s", w->dev->id, b->start, b->count, modbus_strerror(err));
+        if (link_error(err)) {
+            disconnect(w);
+            linked = 0;
+            break;
+        }
+        failed[i] = err ? err : EMBXILADD;
+        mark_block(b, Q_INVALID, ts);
+    }
+    int ok = linked && (nblk == 0 || nok > 0);
+
+    /* 块级事件只在"部分失败"时发；整台设备都读不到时交给下面的离线判定，避免一次断线刷出一串告警 */
+    for (int i = 0; ok && i < w->nblocks; i++) {
+        block_t *b = &w->blocks[i];
+        if (b->group != g)
+            continue;
+        if (failed[i] && !b->bad)
+            event_push(EV_WARN, w->dev->id, "block_err", "%s 地址 %u~%u（%s 等 %d 个点）读取异常：%s，其余点位正常采集",
+                       w->dev->name, b->start, b->start + b->count - 1, b->pts[0]->name, b->npts,
+                       modbus_strerror(failed[i]));
+        else if (!failed[i] && b->bad)
+            event_push(EV_INFO, w->dev->id, "block_ok", "%s 地址 %u~%u 恢复正常", w->dev->name, b->start,
+                       b->start + b->count - 1);
+        b->bad = failed[i] != 0;
+    }
+    if (ok) {
+        int bad = 0;
+        for (int i = 0; i < w->nblocks; i++)
+            bad += w->blocks[i].bad;
+        rtdb_device_set_bad_blocks(w->index, bad);
     }
 
     int changed;

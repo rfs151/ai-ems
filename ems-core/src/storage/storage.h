@@ -22,4 +22,8 @@ void storage_stop(void);
 struct sqlite3;
 struct sqlite3 *storage_open(const char *path);
 
+/* 表结构升级：列不存在时才 ALTER TABLE ADD COLUMN（老版本数据库原地升级，重复执行不报错）。
+ * 返回 1 = 新增了列，0 = 已存在，-1 = 失败 */
+int storage_ensure_column(struct sqlite3 *db, const char *table, const char *column, const char *decl);
+
 #endif

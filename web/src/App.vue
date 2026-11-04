@@ -4,10 +4,12 @@ import { ems } from './composables/useEms'
 import Overview from './components/Overview.vue'
 import PointTable from './components/PointTable.vue'
 import AlgoPage from './components/AlgoPage.vue'
+import RulesPage from './components/RulesPage.vue'
 
 const tabs = [
   { id: 'overview', name: '总览' },
   { id: 'algo', name: '控制算法' },
+  { id: 'rules', name: '规则与告警' },
   { id: 'points', name: '设备与点表' },
 ]
 const tab = ref(tabs.some((t) => '#' + t.id === location.hash) ? location.hash.slice(1) : 'overview')
@@ -36,6 +38,7 @@ const link = computed(() => {
   <div class="page">
     <Overview v-if="tab === 'overview'" />
     <AlgoPage v-else-if="tab === 'algo'" />
+    <RulesPage v-else-if="tab === 'rules'" />
     <PointTable v-else />
   </div>
 </template>

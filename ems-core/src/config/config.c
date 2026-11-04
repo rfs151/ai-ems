@@ -100,7 +100,21 @@ static int parse_point(const cJSON *j, point_def_t *p, const char *profile)
         return -1;
     }
     p->addr = (uint16_t)get_num(j, "addr", 0);
-    p->word_swap = strcmp(order, "CDAB") == 0;
+    static const char *orders[] = {"ABCD", "CDAB", "BADC", "DCBA"};
+    int oi = -1;
+    for (int i = 0; i < 4; i++)
+        if (strcmp(order, orders[i]) == 0)
+            oi = i;
+    if (oi < 0) {        /* 拼错的字节序不能静默当成 ABCD，否则读数错了也看不出来 */
+        LOGE("config", "%s：点 %s 的字节序 %s 不支持（ABCD/CDAB/BADC/DCBA）", profile, p->key, order);
+        return -1;
+    }
+    p->order = (order_t)oi;
+    /* 字节交换（BADC/DCBA）只用于 32 位整数；float 只支持 ABCD/CDAB */
+    if (p->type == DT_F32 && (p->order == ORD_BADC || p->order == ORD_DCBA)) {
+        LOGE("config", "%s：点 %s 是 float32，字节序只能用 ABCD 或 CDAB", profile, p->key);
+        return -1;
+    }
     p->scale = get_num(j, "scale", 1.0);
     p->offset = get_num(j, "offset", 0.0);
     p->bit = (int)get_num(j, "bit", -1);
@@ -210,6 +224,11 @@ int config_load(config_t *cfg, const char *dir)
     cfg->timeout_ms = (int)get_num(poll, "timeout_ms", 500);
     copy_str(cfg->db_path, sizeof cfg->db_path, st, "db", "data/ems.db");
     cfg->retention_hours = (int)get_num(st, "retention_hours", 24);
+    const cJSON *ctl = cJSON_GetObjectItemCaseSensitive(root, "control");
+    cfg->write_interval_ms = (int)get_num(ctl, "write_interval_ms", 300);
+    cfg->lfsm_enabled = !cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(ctl, "lfsm_enabled"));
+    cfg->lfsm_f_start = get_num(ctl, "lfsm_f_start", 50.2);
+    cfg->lfsm_droop = get_num(ctl, "lfsm_droop", 0.02);
 
     /* 容器部署时用环境变量覆盖：设备地址、数据库路径 */
     const char *host_override = getenv("EMS_DEVICE_HOST");
@@ -285,9 +304,27 @@ int point_reg_count(const point_def_t *p)
     return (p->type == DT_U32 || p->type == DT_I32 || p->type == DT_F32) ? 2 : 1;
 }
 
+const char *order_name(order_t o)
+{
+    static const char *n[] = {"ABCD", "CDAB", "BADC", "DCBA"};
+    return (o >= ORD_ABCD && o <= ORD_DCBA) ? n[o] : "?";
+}
+
+static uint16_t bswap16(uint16_t v) { return (uint16_t)(v << 8 | v >> 8); }
+
+/* 两个寄存器 → 按字节序还原的 32 位值 */
 static uint32_t join32(const point_def_t *p, const uint16_t *r)
 {
-    return p->word_swap ? ((uint32_t)r[1] << 16 | r[0]) : ((uint32_t)r[0] << 16 | r[1]);
+    uint16_t hi = r[0], lo = r[1];
+    if (p->order == ORD_CDAB || p->order == ORD_DCBA) {
+        hi = r[1];
+        lo = r[0];
+    }
+    if (p->order == ORD_BADC || p->order == ORD_DCBA) {
+        hi = bswap16(hi);
+        lo = bswap16(lo);
+    }
+    return (uint32_t)hi << 16 | lo;
 }
 
 double point_decode(const point_def_t *p, const uint16_t *r)
@@ -334,7 +371,12 @@ int point_encode(const point_def_t *p, double value, uint16_t out[2])
     default: return 0;
     }
     uint16_t hi = (uint16_t)(u >> 16), lo = (uint16_t)(u & 0xFFFF);
-    out[0] = p->word_swap ? lo : hi;
-    out[1] = p->word_swap ? hi : lo;
+    if (p->order == ORD_BADC || p->order == ORD_DCBA) {
+        hi = bswap16(hi);
+        lo = bswap16(lo);
+    }
+    int swap = p->order == ORD_CDAB || p->order == ORD_DCBA;
+    out[0] = swap ? lo : hi;
+    out[1] = swap ? hi : lo;
     return 2;
 }

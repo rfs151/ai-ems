@@ -33,6 +33,9 @@ def apply_scenario(plant: Plant, msg: dict) -> None:
     elif act == "comm":
         dev, down = str(msg.get("device")), bool(msg.get("down"))
         (plant.comm_down.add if down else plant.comm_down.discard)(dev)
+    elif act == "block":
+        dev, bad = str(msg.get("device")), bool(msg.get("bad"))
+        (plant.bad_block.add if bad else plant.bad_block.discard)(dev)
     elif act == "di":
         key = msg.get("name")
         if key in plant.di:
@@ -42,6 +45,7 @@ def apply_scenario(plant: Plant, msg: dict) -> None:
         plant.bat1.soc, plant.bat2.soc = fresh.bat1.soc, fresh.bat2.soc
         plant.freq.disturbance = 0.0
         plant.comm_down.clear()
+        plant.bad_block.clear()
         plant.di.update(fresh.di)
         plant.do.update(fresh.do)
         for p in (plant.pcs1, plant.pcs2):

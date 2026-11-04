@@ -39,6 +39,12 @@ def u32_abcd(v: float) -> list[int]:
     return [n >> 16, n & 0xFFFF]
 
 
+def u32_dcba(v: float) -> list[int]:
+    """完全小端：字节顺序 D C B A（低字在前，字内也是低字节在前）。"""
+    b = struct.pack("<I", int(round(v)) & 0xFFFFFFFF)
+    return [b[0] << 8 | b[1], b[2] << 8 | b[3]]
+
+
 def decode_f32_cdab(regs: list[int]) -> float:
     return struct.unpack(">f", struct.pack(">HH", regs[1], regs[0]))[0]
 
@@ -47,13 +53,13 @@ def decode_f32_cdab(regs: list[int]) -> float:
 class Block(ModbusSequentialDataBlock):
     """可挂写回调的数据块；设备通信中断时拒绝访问（主站收到异常响应）。"""
 
-    def __init__(self, size: int, online: Callable[[], bool], on_write=None):
+    def __init__(self, size: int, online: Callable[[int, int], bool], on_write=None):
         super().__init__(0, [0] * size)
         self._online = online
         self._on_write = on_write
 
     def validate(self, address, count=1):
-        return self._online() and super().validate(address, count)
+        return self._online(address, count) and super().validate(address, count)
 
     def setValues(self, address, values):  # noqa: N802 (pymodbus 接口名)
         super().setValues(address, values)
@@ -72,8 +78,16 @@ class Device:
     def __init__(self, plant: Plant):
         self.plant = plant
 
-    def online(self) -> bool:
-        return self.name not in self.plant.comm_down
+    # 故障注入"部分寄存器异常"时屏蔽的地址区间（半开区间）
+    bad_range: tuple[int, int] | None = None
+
+    def online(self, address: int = 0, count: int = 1) -> bool:
+        if self.name in self.plant.comm_down:
+            return False
+        if self.bad_range and self.name in self.plant.bad_block:
+            lo, hi = self.bad_range
+            return address + count <= lo or address >= hi      # 与屏蔽区间重叠就返回异常响应
+        return True
 
     def context(self) -> ModbusSlaveContext:
         raise NotImplementedError
@@ -177,6 +191,7 @@ class VendorBBattery(Device):
     """
 
     name, port = "bat1", 15023
+    bad_range = (20, 36)          # 故障注入：单体电压区返回"非法地址"异常
 
     def __init__(self, plant: Plant):
         super().__init__(plant)
@@ -198,7 +213,7 @@ class VendorBBattery(Device):
 
 # ------------------------------------------------------------------ 厂商 C · 电池簇
 class VendorCBattery(Device):
-    """厂商 C 电池簇：保持寄存器，累计量用 uint32（ABCD），状态按位打包，告警用代码表。
+    """厂商 C 电池簇：保持寄存器，累计量用 uint32 完全小端（DCBA），状态按位打包，告警用代码表。
 
     0-1 累计充电量 0.1kWh  2-3 累计放电量 0.1kWh  4 SOC 0.01%  5 总压 0.1V
     6 电流 0.1A(int16，正=放电)  7 平均温度 0.1℃
@@ -222,7 +237,7 @@ class VendorCBattery(Device):
         b, p = self.bat, self.pcs.p_kw
         alarm = 0x21 if b.temp_c > 45 else (0x12 if b.soc < 3 else 0)
         bits = 1 | (2 if p < -2 else 0) | (4 if p > 2 else 0) | (8 if alarm else 0)
-        self.hr.put(0, u32_abcd(b.charge_kwh * 10) + u32_abcd(b.discharge_kwh * 10)
+        self.hr.put(0, u32_dcba(b.charge_kwh * 10) + u32_dcba(b.discharge_kwh * 10)
                     + [u16(b.soc * 100), u16(b.pack_v * 10), i16(self.pcs.dc_current_a() * 10),
                        i16(b.temp_c * 10), bits, alarm, u16(b.max_charge_kw()), u16(b.max_discharge_kw())])
 

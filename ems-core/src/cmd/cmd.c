@@ -13,6 +13,7 @@
 
 #include "../../third_party/cjson/cJSON.h"
 #include "../control/control.h"
+#include "../rules/rules.h"
 #include "../util/log.h"
 
 static int g_fd = -1;
@@ -36,6 +37,8 @@ static void handle(const char *req, int len, char *reply, size_t rsz)
             id = jid->valuestring;
         if (!cJSON_IsString(type))
             snprintf(msg, sizeof msg, "缺少指令类型");
+        else if (strncmp(type->valuestring, "rule_", 5) == 0)
+            ok = rules_command(type->valuestring, j, msg, sizeof msg) == 0;
         else
             ok = control_command(type->valuestring, j, msg, sizeof msg) == 0;
     }

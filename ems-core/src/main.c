@@ -2,7 +2,7 @@
  *
  *   ems-core [-c 配置目录] [-v]
  *
- * 启动顺序：配置 → 实时库 → 存储 → 采集 → 控制 → 指令通道；退出时反向停止，
+ * 启动顺序：配置 → 实时库 → 存储 → 采集 → 控制 → 规则 → 指令通道；退出时反向停止，
  * 并先把 PCS 设定值清零再断开设备连接。
  */
 #include <errno.h>
@@ -19,6 +19,7 @@
 #include "config/config.h"
 #include "control/control.h"
 #include "rtdb/rtdb.h"
+#include "rules/rules.h"
 #include "storage/storage.h"
 #include "util/log.h"
 
@@ -28,6 +29,13 @@ static void on_signal(int sig)
 {
     (void)sig;
     g_stop = 1;
+}
+
+/* 每秒遥测报文里追加各模块状态 */
+static void status_all(struct cJSON *obj)
+{
+    control_status(obj);
+    rules_status(obj);
 }
 
 static void ensure_dir_of(const char *path)
@@ -64,8 +72,9 @@ int main(int argc, char **argv)
     LOGI("main", "站点 %s（%s），%d 台设备", cfg.site_id, cfg.site_name, cfg.ndevices);
 
     ensure_dir_of(cfg.db_path);
-    if (rtdb_init(&cfg) || storage_start(&cfg, control_status) || acq_start(&cfg) ||
-        control_start(&cfg) || cmd_start(&cfg)) {
+    /* 存储线程最先启动：之后各模块的事件都有人落库（事件队列先于产生方就绪） */
+    if (rtdb_init(&cfg) || storage_start(&cfg, status_all) || acq_start(&cfg) || control_start(&cfg) ||
+        rules_start(&cfg) || cmd_start(&cfg)) {
         LOGE("main", "启动失败");
         return 1;
     }
@@ -76,6 +85,7 @@ int main(int argc, char **argv)
 
     LOGI("main", "正在退出");
     cmd_stop();
+    rules_stop();
     control_stop();
     usleep(300 * 1000);      /* 给采集线程时间下发清零设定值 */
     acq_stop();

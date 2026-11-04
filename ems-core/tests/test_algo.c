@@ -19,8 +19,8 @@ static int g_fail, g_pass;
 #define CHECK_NEAR(a, b, eps) CHECK(NEAR(a, b, eps), "期望 %.3f，实际 %.3f", (double)(b), (double)(a))
 
 static const fcr_cfg_t FCR = {50.0, 0.01, 0.2, 200.0};
-static const lfsmo_cfg_t LFSM = {50.0, 50.2, 0.02, 1000.0};
-static const mfrr_cfg_t MF = {30000, 60000, 30 * 60000, 50.0, 1000.0};
+static const lfsmo_cfg_t LFSM = {1, 50.0, 50.2, 0.02};
+static const mfrr_cfg_t MF = {30000, 60000, 30 * 60000, 50.0, 1000.0, 0, 0, 0};   /* 无准备期、连续爬坡 */
 
 static mfrr_cmd_t direct(const char *id, int dir, double p, int64_t dur)
 {
@@ -41,10 +41,88 @@ static void test_fcr(void)
 static void test_lfsmo(void)
 {
     printf("LFSM-O 过频限功率\n");
-    CHECK_NEAR(lfsmo_power(&LFSM, 50.2), 0, 1e-9);
-    CHECK_NEAR(lfsmo_power(&LFSM, 49.8), 0, 1e-9);
-    CHECK_NEAR(lfsmo_power(&LFSM, 50.3), -100, 1e-6);   /* 2% 下垂：每 0.1Hz 减 10% 额定 */
-    CHECK_NEAR(lfsmo_power(&LFSM, 50.45), -250, 1e-6);
+    CHECK_NEAR(lfsmo_power(&LFSM, 50.2, 500), 0, 1e-9);
+    CHECK_NEAR(lfsmo_power(&LFSM, 49.8, 500), 0, 1e-9);
+    CHECK_NEAR(lfsmo_power(&LFSM, 50.3, 500), -50, 1e-6);    /* 2% 下垂：每 0.1Hz 减当前出力的 10% */
+    CHECK_NEAR(lfsmo_power(&LFSM, 50.45, 400), -100, 1e-6);
+    CHECK_NEAR(lfsmo_power(&LFSM, 51.5, 300), -300, 1e-6);   /* 最多削到 0，不反向 */
+    /* 回归：充电时不调整（早期版本对负功率也按比例"减"，结果是加大充电或翻成放电） */
+    CHECK_NEAR(lfsmo_power(&LFSM, 50.4, -200), 0, 1e-9);
+    CHECK_NEAR(lfsmo_power(&LFSM, 50.4, 0), 0, 1e-9);
+    lfsmo_cfg_t off = LFSM;
+    off.enabled = 0;
+    CHECK_NEAR(lfsmo_power(&off, 50.4, 500), 0, 1e-9);        /* 开关关闭 */
+}
+
+/* 演示配置：准备 6s、爬坡 24s、1 秒一档、直接激活最多提前 60 秒 */
+static const mfrr_cfg_t MP = {24000, 60000, 30 * 60000, 50.0, 1000.0, 6000, 1000, 60000};
+
+static void test_prep_and_steps(void)
+{
+    printf("mFRR 准备期与台阶\n");
+    mfrr_state_t s;
+    mfrr_init(&s);
+    char why[96];
+    int64_t t = 1000000;
+    mfrr_cmd_t c = direct("a", 1, 240, 60000);
+    CHECK(mfrr_submit(&s, &MP, &c, t, why, sizeof why) == 0, "提交失败：%s", why);
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 3000), 0, 1e-9);
+    CHECK(s.act[0].phase == MFRR_PREP, "前 6 秒应处于准备期");
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 6000), 0, 1e-9);
+    CHECK(s.act[0].phase == MFRR_RAMP_UP, "准备期满应开始爬坡");
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 6000 + 2500), 20, 1e-6);   /* 2.5s 只走 2 档：每档 10 kW */
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 6000 + 2999), 20, 1e-6);
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 6000 + 3000), 30, 1e-6);
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 30000), 240, 1e-6);
+    CHECK(s.act[0].phase == MFRR_HOLD, "应在保持");
+    /* 交付 60s 从开始爬坡算起：t+6s+60s 这一刻就进入降坡（边界用 >=，不多保持一档） */
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 66000 - 1), 240, 1e-6);
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 66000), 240, 1e-6);
+    CHECK(s.act[0].phase == MFRR_RAMP_DOWN, "交付结束时刻应已进入降坡");
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 67000), 230, 1e-6);
+    CHECK_NEAR(mfrr_update(&s, &MP, t + 90000), 0, 1e-9);
+    CHECK(s.act[0].phase == MFRR_DONE, "降坡结束");
+    /* 准备期内取消：直接结束，不产生功率 */
+    mfrr_cmd_t d = direct("b", -1, 100, 60000);
+    mfrr_submit(&s, &MP, &d, t + 100000, why, sizeof why);
+    mfrr_update(&s, &MP, t + 102000);
+    CHECK(mfrr_cancel(&s, &MP, "b", t + 102000) == 0 && s.act[0].phase == MFRR_DONE, "准备期内取消应直接结束");
+}
+
+static void test_activation_time(void)
+{
+    printf("mFRR 激活时间校验\n");
+    mfrr_state_t s;
+    mfrr_init(&s);
+    char why[96];
+    /* 计划激活：窗口边界已过 4 秒，但还在 6 秒准备期内 → 接受，准备期缩短 */
+    mfrr_cmd_t c = {.id = "late", .dir = 1, .power = 200, .scheduled = 1, .t_start = 600000, .duration_ms = 60000};
+    CHECK(mfrr_submit(&s, &MP, &c, 604000, why, sizeof why) == 0, "准备期内迟到的计划指令应接受：%s", why);
+    CHECK_NEAR(mfrr_update(&s, &MP, 604000), 0, 1e-9);
+    CHECK(s.act[0].phase == MFRR_PREP, "应直接进入准备期");
+    CHECK_NEAR(mfrr_update(&s, &MP, 606000 + 12000), 100, 1e-6);   /* 仍按原时刻表爬坡 */
+    /* 超过准备期 → 拒绝 */
+    c.id = "late2";
+    c.t_start = 720000;
+    CHECK(mfrr_submit(&s, &MP, &c, 726001, why, sizeof why) < 0 && strstr(why, "已过"), "超过准备期应拒绝：%s", why);
+
+    /* 直接激活带开始时间：提前量 0~60 秒 */
+    mfrr_init(&s);
+    int64_t now = 2000000;
+    mfrr_cmd_t d = direct("d1", 1, 200, 60000);
+    d.t_start = now - 1;
+    CHECK(mfrr_submit(&s, &MP, &d, now, why, sizeof why) < 0 && strstr(why, "已过"), "开始时间已过应拒绝：%s", why);
+    d.t_start = now + 61000;
+    CHECK(mfrr_submit(&s, &MP, &d, now, why, sizeof why) < 0 && strstr(why, "最多提前"), "提前太多应拒绝：%s", why);
+    d.t_start = now + 20000;
+    CHECK(mfrr_submit(&s, &MP, &d, now, why, sizeof why) == 0, "合法提前量被拒：%s", why);
+    CHECK_NEAR(mfrr_update(&s, &MP, now + 10000), 0, 1e-9);
+    CHECK(s.act[0].phase == MFRR_PENDING, "未到开始时间应等待");
+    mfrr_update(&s, &MP, now + 20000);
+    CHECK(s.act[0].phase == MFRR_PREP, "到开始时间进入准备期");
+    /* 不支持提前量的配置 */
+    d.id = "d2";
+    CHECK(mfrr_submit(&s, &MF, &d, now, why, sizeof why) < 0 && strstr(why, "不支持"), "未开启提前量应拒绝：%s", why);
 }
 
 static void test_trajectory(void)
@@ -196,6 +274,8 @@ int main(void)
     test_fcr();
     test_lfsmo();
     test_trajectory();
+    test_prep_and_steps();
+    test_activation_time();
     test_validation();
     test_stacking();
     test_handover();

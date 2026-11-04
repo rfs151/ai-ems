@@ -12,26 +12,35 @@ export interface DeviceMeta {
 }
 export interface Meta { site: string; name: string; ts: number; devices: DeviceMeta[] }
 
-export interface DevStatus { online: boolean; poll_ms: number; reads: number; errors: number; writes: number }
+export interface DevStatus { online: boolean; poll_ms: number; reads: number; errors: number; writes: number; bad_blocks?: number }
 export interface MfrrAct {
-  id: string; dir: number; power: number; scheduled: boolean; t_start: number; t_end: number
+  id: string; dir: number; power: number; scheduled: boolean; t_act: number; t_start: number; t_end: number
   start_level: number; phase: string; level: number; end_reason?: string
 }
 export interface CtlCfg {
   mfrr_ramp_s: number; mfrr_window_s: number; mfrr_p_max: number
+  mfrr_prep_s: number; mfrr_step_s: number; mfrr_direct_lead_s: number; write_interval_ms: number
   fcr_p_max: number; fcr_deadband: number; fcr_full_dev: number
-  lfsmo_start: number; lfsmo_droop: number; lfsmo_p_ref: number
+  lfsmo_enabled: boolean; lfsmo_start: number; lfsmo_droop: number
 }
 export interface CtlStatus {
   mode: 'vpp' | 'schedule'; fcr_enabled: boolean
-  p_base: number; p_mfrr: number; p_fcr: number; p_lfsmo: number; p_req: number; p_cmd: number
+  p_base: number; p_mfrr: number; p_fcr: number; p_pre: number; p_lfsmo: number; p_req: number; p_cmd: number
   p_chg_max: number; p_dis_max: number
-  interlock: boolean; interlock_reason?: string; share: Record<string, number>
+  interlock: boolean; interlock_reason?: string; share: Record<string, number>; write_merged?: Record<string, number>
   mfrr: MfrrAct[]; cfg: CtlCfg
+}
+export interface RuleStatus {
+  id: string; name: string; point: string; cond: string; level: number; action: string
+  limit_min: number; limit_day: number; enabled: boolean
+  active: boolean; hits: number; suppressed: number; evals: number; avg_us: number; last_hit: number; min_count: number
+}
+export interface RulesStatus {
+  tick_us: number; bench: { n: number; linear_ns: number; bsearch_ns: number }; list: RuleStatus[]
 }
 export interface Telemetry {
   ts: number; v: Record<string, number>; bad: string[]
-  dev: Record<string, DevStatus>; ctl: CtlStatus
+  dev: Record<string, DevStatus>; ctl: CtlStatus; rules?: RulesStatus
 }
 export interface HistoryItem {
   ts: number; v: Record<string, number>

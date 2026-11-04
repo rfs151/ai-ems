@@ -31,6 +31,7 @@ typedef struct {
     uint64_t errors;
     uint64_t writes;
     double poll_ms;     /* 最近一轮快组采集耗时 */
+    int bad_blocks;     /* 读取异常的寄存器块数（部分失败，设备仍在线） */
 } rt_device_t;
 
 int rtdb_init(const config_t *cfg);
@@ -50,6 +51,7 @@ int rtdb_snapshot(rt_point_t *out);
 
 void rtdb_device_update(int dev, int ok, double poll_ms, int offline_after, int *changed);
 void rtdb_device_count_write(int dev);
+void rtdb_device_set_bad_blocks(int dev, int n);
 void rtdb_device_get(int dev, rt_device_t *out);
 
 #endif

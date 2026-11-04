@@ -11,6 +11,10 @@
 typedef enum { AREA_HR, AREA_IR, AREA_CO, AREA_DI } area_t;
 typedef enum { DT_U16, DT_I16, DT_U32, DT_I32, DT_F32, DT_BIT } dtype_t;
 typedef enum { GROUP_FAST, GROUP_SLOW } group_t;
+/* 32 位量的字节序（A 为最高字节）：
+ *   ABCD 大端；CDAB 低字在前（字交换）；BADC 字内字节交换；DCBA 完全小端
+ *   BADC/DCBA 只用于 int32/uint32（float32 只支持 ABCD/CDAB） */
+typedef enum { ORD_ABCD, ORD_CDAB, ORD_BADC, ORD_DCBA } order_t;
 
 typedef struct {
     char key[32];       /* 统一模型键，如 p、soc、cell03 */
@@ -19,7 +23,7 @@ typedef struct {
     area_t area;
     uint16_t addr;
     dtype_t type;
-    int word_swap;      /* 1 = CDAB（低字在前） */
+    order_t order;      /* 32 位量的字节序 */
     double scale;
     double offset;
     int bit;            /* >=0：取寄存器的某一位 */
@@ -62,6 +66,11 @@ typedef struct {
     int timeout_ms;
     char db_path[256];
     int retention_hours;
+    /* control 段 */
+    int write_interval_ms;   /* 同一台 PCS 两次下发设定值的最小间隔 */
+    int lfsm_enabled;
+    double lfsm_f_start;
+    double lfsm_droop;
     device_cfg_t *devices;
     int ndevices;
 } config_t;
@@ -79,5 +88,6 @@ double point_decode(const point_def_t *p, const uint16_t *regs);
 /* 工程值 → 原始寄存器，返回寄存器个数（1 或 2） */
 int point_encode(const point_def_t *p, double value, uint16_t out[2]);
 int point_reg_count(const point_def_t *p);
+const char *order_name(order_t o);
 
 #endif
