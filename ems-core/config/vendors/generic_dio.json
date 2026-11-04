@@ -1,0 +1,14 @@
+{
+  "vendor": "通用", "model": "DI/DO 模块", "type": "dio",
+  "points": [
+    { "key": "estop",        "area": "di", "addr": 0, "type": "bit", "group": "fast", "name": "急停" },
+    { "key": "fire",         "area": "di", "addr": 1, "type": "bit", "group": "fast", "name": "消防动作" },
+    { "key": "door",         "area": "di", "addr": 2, "type": "bit", "group": "fast", "name": "柜门打开" },
+    { "key": "grid_breaker", "area": "co", "addr": 0, "type": "bit", "group": "fast", "name": "并网开关" },
+    { "key": "fan",          "area": "co", "addr": 1, "type": "bit", "group": "slow", "name": "风机" }
+  ],
+  "controls": [
+    { "key": "grid_breaker_cmd", "area": "co", "addr": 0, "type": "bit", "name": "并网开关" },
+    { "key": "fan_cmd",          "area": "co", "addr": 1, "type": "bit", "name": "风机" }
+  ]
+}

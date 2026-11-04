@@ -1,0 +1,17 @@
+{
+  "vendor": "厂商 C", "model": "CL-BMU", "type": "bms",
+  "comment": "保持寄存器；累计电量 uint32（ABCD）；状态位打包；告警为代码表",
+  "points": [
+    { "key": "e_chg",     "area": "hr", "addr": 0,  "type": "u32", "order": "ABCD", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计充电量" },
+    { "key": "e_dis",     "area": "hr", "addr": 2,  "type": "u32", "order": "ABCD", "scale": 0.1, "unit": "kWh", "group": "slow", "name": "累计放电量" },
+    { "key": "soc",       "area": "hr", "addr": 4,  "type": "u16", "scale": 0.01, "unit": "%", "group": "fast", "name": "SOC" },
+    { "key": "v",         "area": "hr", "addr": 5,  "type": "u16", "scale": 0.1,  "unit": "V", "group": "fast", "name": "总电压" },
+    { "key": "i",         "area": "hr", "addr": 6,  "type": "i16", "scale": 0.1,  "unit": "A", "group": "fast", "name": "总电流" },
+    { "key": "tmax",      "area": "hr", "addr": 7,  "type": "i16", "scale": 0.1,  "unit": "℃", "group": "slow", "name": "平均温度" },
+    { "key": "fault",     "area": "hr", "addr": 8,  "type": "u16", "bit": 3, "group": "fast", "name": "告警" },
+    { "key": "alarm_code","area": "hr", "addr": 9,  "type": "u16", "group": "fast", "name": "告警码",
+      "enum": { "0": "无", "17": "单体过压", "18": "单体欠压", "33": "过温", "49": "绝缘低" } },
+    { "key": "p_chg_max", "area": "hr", "addr": 10, "type": "u16", "unit": "kW", "group": "fast", "name": "允许充电功率" },
+    { "key": "p_dis_max", "area": "hr", "addr": 11, "type": "u16", "unit": "kW", "group": "fast", "name": "允许放电功率" }
+  ]
+}

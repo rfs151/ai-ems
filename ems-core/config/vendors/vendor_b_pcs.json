@@ -1,0 +1,20 @@
+{
+  "vendor": "厂商 B", "model": "BX-PCS500", "type": "pcs",
+  "comment": "float32 低字在前（CDAB）；状态按位打包；写设定值前须先写使能字 0xA5A5",
+  "points": [
+    { "key": "p",     "area": "hr", "addr": 0,  "type": "f32", "order": "CDAB", "unit": "kW",   "group": "fast", "name": "有功功率" },
+    { "key": "q",     "area": "hr", "addr": 2,  "type": "f32", "order": "CDAB", "unit": "kvar", "group": "fast", "name": "无功功率" },
+    { "key": "vac",   "area": "hr", "addr": 4,  "type": "f32", "order": "CDAB", "unit": "V",    "group": "slow", "name": "交流电压" },
+    { "key": "vdc",   "area": "hr", "addr": 6,  "type": "f32", "order": "CDAB", "unit": "V",    "group": "slow", "name": "直流电压" },
+    { "key": "temp",  "area": "hr", "addr": 8,  "type": "f32", "order": "CDAB", "unit": "℃",    "group": "slow", "name": "模块温度" },
+    { "key": "run",   "area": "hr", "addr": 10, "type": "u16", "bit": 0, "group": "fast", "name": "运行" },
+    { "key": "fault", "area": "hr", "addr": 10, "type": "u16", "bit": 1, "group": "fast", "name": "故障" },
+    { "key": "remote","area": "hr", "addr": 10, "type": "u16", "bit": 2, "group": "slow", "name": "远方" },
+    { "key": "set_rejected", "area": "hr", "addr": 10, "type": "u16", "bit": 3, "group": "fast", "name": "设定值被拒绝" }
+  ],
+  "controls": [
+    { "key": "run_cmd", "area": "hr", "addr": 201, "type": "u16", "name": "启停命令" },
+    { "key": "p_set",   "area": "hr", "addr": 202, "type": "f32", "order": "CDAB", "unit": "kW", "name": "有功设定",
+      "unlock": { "addr": 200, "value": 42405 } }
+  ]
+}

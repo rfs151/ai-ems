@@ -1,0 +1,7 @@
+.venv
+**/node_modules
+**/dist
+**/build
+**/build-asan
+**/data
+**/__pycache__

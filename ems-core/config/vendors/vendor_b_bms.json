@@ -1,0 +1,16 @@
+{
+  "vendor": "厂商 B", "model": "BX-BMS", "type": "bms",
+  "comment": "输入寄存器（只读）；单体电压连续存放，批量读取",
+  "points": [
+    { "key": "soc",       "area": "ir", "addr": 0, "type": "u16", "scale": 0.1, "unit": "%",  "group": "fast", "name": "SOC" },
+    { "key": "soh",       "area": "ir", "addr": 1, "type": "u16", "scale": 0.1, "unit": "%",  "group": "slow", "name": "SOH" },
+    { "key": "v",         "area": "ir", "addr": 2, "type": "u16", "scale": 0.1, "unit": "V",  "group": "fast", "name": "总电压" },
+    { "key": "i",         "area": "ir", "addr": 3, "type": "i16", "scale": 0.1, "unit": "A",  "group": "fast", "name": "总电流" },
+    { "key": "tmax",      "area": "ir", "addr": 4, "type": "i16", "scale": 0.1, "unit": "℃",  "group": "slow", "name": "最高温度" },
+    { "key": "tmin",      "area": "ir", "addr": 5, "type": "i16", "scale": 0.1, "unit": "℃",  "group": "slow", "name": "最低温度" },
+    { "key": "fault",     "area": "ir", "addr": 6, "type": "u16", "eq": 3, "group": "fast", "name": "故障" },
+    { "key": "p_chg_max", "area": "ir", "addr": 7, "type": "u16", "unit": "kW", "group": "fast", "name": "允许充电功率" },
+    { "key": "p_dis_max", "area": "ir", "addr": 8, "type": "u16", "unit": "kW", "group": "fast", "name": "允许放电功率" },
+    { "key": "cell", "area": "ir", "addr": 20, "type": "u16", "count": 16, "scale": 0.001, "unit": "V", "group": "slow", "name": "单体电压" }
+  ]
+}

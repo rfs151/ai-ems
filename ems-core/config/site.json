@@ -1,0 +1,13 @@
+{
+  "site": { "id": "demo01", "name": "示范储能站 1MW/2MWh" },
+  "poll": { "fast_ms": 200, "slow_ms": 5000, "offline_after_failures": 3, "timeout_ms": 500 },
+  "storage": { "db": "data/ems.db", "retention_hours": 24 },
+  "devices": [
+    { "id": "pcs1",  "name": "PCS-1",   "profile": "vendor_a_pcs",  "host": "127.0.0.1", "port": 15021, "unit": 1 },
+    { "id": "pcs2",  "name": "PCS-2",   "profile": "vendor_b_pcs",  "host": "127.0.0.1", "port": 15022, "unit": 1 },
+    { "id": "bat1",  "name": "电池簇-1", "profile": "vendor_b_bms",  "host": "127.0.0.1", "port": 15023, "unit": 1, "pcs": "pcs1" },
+    { "id": "bat2",  "name": "电池簇-2", "profile": "vendor_c_bms",  "host": "127.0.0.1", "port": 15024, "unit": 1, "pcs": "pcs2" },
+    { "id": "meter", "name": "关口电表", "profile": "generic_meter", "host": "127.0.0.1", "port": 15025, "unit": 1 },
+    { "id": "dio",   "name": "DI/DO",   "profile": "generic_dio",   "host": "127.0.0.1", "port": 15026, "unit": 1 }
+  ]
+}

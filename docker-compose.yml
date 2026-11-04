@@ -1,0 +1,71 @@
+# 储能 EMS 演示：设备仿真 → ems-core（采集/控制/存储）→ ems-sync（上云）→ mosquitto → cloud（页面 + WebSocket）
+# 对外只暴露 127.0.0.1:${HTTP_PORT}，由统一网关（/root/proj/gateway）转发 ems.edgebot.vip。
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+  environment:
+    TZ: Asia/Shanghai
+    MQTT_HOST: mosquitto
+
+services:
+  mosquitto:
+    <<: *common
+    image: ${REGISTRY:-docker.io}/library/eclipse-mosquitto:2.0.20
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    deploy: { resources: { limits: { memory: 64m } } }
+
+  device-sim:
+    <<: *common
+    image: ai-ems-sim:${TAG:-latest}
+    build: { context: device-sim, network: host, args: { REGISTRY: "${REGISTRY:-docker.io}", PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}" } }
+    depends_on: [mosquitto]
+    deploy: { resources: { limits: { memory: 128m } } }
+
+  ems-core:
+    <<: *common
+    image: ai-ems-core:${TAG:-latest}
+    build: { context: ems-core, network: host, args: { REGISTRY: "${REGISTRY:-docker.io}" } }
+    environment:
+      TZ: Asia/Shanghai
+      EMS_DEVICE_HOST: device-sim
+      EMS_DB: /data/ems.db
+    volumes: [ems-data:/data]
+    depends_on: [device-sim]
+    stop_grace_period: 5s          # 退出前把 PCS 设定值清零
+    deploy: { resources: { limits: { memory: 64m } } }
+
+  ems-sync:
+    <<: *common
+    image: ai-ems-core:${TAG:-latest}
+    command: ["ems-sync", "-c", "/app/config"]
+    environment:
+      TZ: Asia/Shanghai
+      MQTT_HOST: mosquitto
+      EMS_DB: /data/ems.db
+    volumes: [ems-data:/data]
+    depends_on: [ems-core, mosquitto]
+    deploy: { resources: { limits: { memory: 32m } } }
+
+  cloud:
+    <<: *common
+    image: ai-ems-cloud:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: cloud/Dockerfile
+      network: host
+      args: { REGISTRY: "${REGISTRY:-docker.io}", PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}", NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}" }
+    depends_on: [mosquitto]
+    ports: ["127.0.0.1:${HTTP_PORT:-8095}:8095"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8095/api/health', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy: { resources: { limits: { memory: 192m } } }
+
+volumes:
+  ems-data:

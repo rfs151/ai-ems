@@ -1,0 +1,18 @@
+{
+  "vendor": "厂商 A", "model": "PCS-500A", "type": "pcs",
+  "comment": "保持寄存器，int16 × 0.1，大端；运行状态是枚举值",
+  "points": [
+    { "key": "run",        "area": "hr", "addr": 0,   "type": "u16", "eq": 1,   "group": "fast", "name": "运行" },
+    { "key": "fault",      "area": "hr", "addr": 0,   "type": "u16", "eq": 2,   "group": "fast", "name": "故障" },
+    { "key": "p",          "area": "hr", "addr": 1,   "type": "i16", "scale": 0.1, "unit": "kW",   "group": "fast", "name": "有功功率" },
+    { "key": "q",          "area": "hr", "addr": 2,   "type": "i16", "scale": 0.1, "unit": "kvar", "group": "fast", "name": "无功功率" },
+    { "key": "vac",        "area": "hr", "addr": 3,   "type": "u16", "scale": 0.1, "unit": "V",    "group": "slow", "name": "交流电压" },
+    { "key": "vdc",        "area": "hr", "addr": 4,   "type": "u16", "scale": 0.1, "unit": "V",    "group": "slow", "name": "直流电压" },
+    { "key": "temp",       "area": "hr", "addr": 5,   "type": "i16", "scale": 0.1, "unit": "℃",    "group": "slow", "name": "IGBT 温度" },
+    { "key": "fault_code", "area": "hr", "addr": 6,   "type": "u16", "group": "slow", "name": "故障码" }
+  ],
+  "controls": [
+    { "key": "run_cmd", "area": "hr", "addr": 100, "type": "u16", "name": "启停命令" },
+    { "key": "p_set",   "area": "hr", "addr": 101, "type": "i16", "scale": 0.1, "unit": "kW", "name": "有功设定" }
+  ]
+}

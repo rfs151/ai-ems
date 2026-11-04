@@ -1,0 +1,10 @@
+{
+  "vendor": "通用", "model": "并网点电表", "type": "meter",
+  "comment": "输入寄存器 float32（ABCD）",
+  "points": [
+    { "key": "p", "area": "ir", "addr": 0, "type": "f32", "order": "ABCD", "unit": "kW",   "group": "fast", "name": "并网点有功" },
+    { "key": "q", "area": "ir", "addr": 2, "type": "f32", "order": "ABCD", "unit": "kvar", "group": "fast", "name": "并网点无功" },
+    { "key": "f", "area": "ir", "addr": 4, "type": "f32", "order": "ABCD", "unit": "Hz",   "group": "fast", "name": "电网频率" },
+    { "key": "v", "area": "ir", "addr": 6, "type": "f32", "order": "ABCD", "unit": "kV",   "group": "slow", "name": "A 相电压" }
+  ]
+}
