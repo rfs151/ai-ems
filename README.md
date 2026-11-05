@@ -3,6 +3,18 @@
 部署在储能站现场的 EMS 边缘网关：多厂商设备 Modbus 接入、功率控制、本地存储、云边协同。
 设备为仿真，厂商名称均为虚构。详细设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+在线演示：<https://ems.edgebot.vip/>
+
+![演示：频率扰动 → 控制算法 → mFRR 调度 → 规则引擎](docs/demo.gif)
+
+**亮点**
+
+- **100 ms 控制周期**：计划 + mFRR + FCR + LFSM-O 叠加成站级指令，再经 SOC 限幅和爬坡限制；约 4000 行 C99
+- **多厂商接入**：3 家虚构厂商的 PCS / BMS 加电表、DI/DO 共 6 台设备，点表用 JSON 配置，支持 4 种字节序；快组 200 ms、慢组 5 s 采集
+- **规则引擎**：TinyExpr 表达式，每 200 ms 一轮约 5 µs；1000 条规则时二分查找 33 ns，线性查找 223 ns（网关启动时实测）
+- **断网不丢数据**：SQLite WAL 发件箱，每 1 s 或满 200 条打包上云，恢复后按时间顺序补传；云端下发指令往返约 50 ms（本机实测）
+- **144 项单元测试**（控制算法 91、点位编解码 23、规则 30），可在 ASan / UBSan 下运行
+
 ```
 device-sim (Python)  ──Modbus TCP──▶  ems-core (C99)  ──SQLite 发件箱──▶  ems-sync (C99)
                                          采集/控制/存储                      MQTT 上云
